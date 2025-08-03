@@ -1,68 +1,69 @@
-require('dotenv').config();
-const ffmpeg = require('fluent-ffmpeg');
-const ffmpegpath = require('@ffmpeg-installer/ffmpeg').path;
-ffmpeg.setFfmpegPath(ffmpegpath);
+import ffmpeg from 'fluent-ffmpeg';
+import { path as ffmpegPath } from '@ffmpeg-installer/ffmpeg';
+ffmpeg.setFfmpegPath(ffmpegPath);
+console.log("FFmpeg Path:", ffmpegPath);
 
-const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
-const { fromIni } = require('@aws-sdk/credential-provider-ini');
+import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
+import { Upload } from '@aws-sdk/lib-storage';
 
-const s3 = new S3Client({
-  region: 'ap-southeast-2',
-  credentials: {
-    accessKeyId: process.env.aws_access_key_id,
-    secretAccessKey: process.env.aws_secret_access_key,
-    sessionToken: process.env.aws_session_token,  // Optional, for temporary credentials
-  },
+import { spawn } from 'child_process';
 
-});
+// Use envrionment variables
+import dotenv from 'dotenv';
+dotenv.config();
 
-async function transcodeVideo(videoId, res) {
+const s3 = new S3Client({ region: process.env.REGION });
+
+export async function transcodeVideo(bucket, key) {
   const s3Params = {
-    Bucket: 'n11245409-assessment2',
-    Key: videoId
+    Bucket: bucket,
+    Key: key
   };
   try {
-    // Fetch the video from S3
-    const s3Data = await s3.send(new GetObjectCommand(s3Params));
-    const s3Stream = s3Data.Body;
+    // Fetch the video as a stream from S3
+    console.log(`Streaming video from S3... ${bucket}`);
+    const { Body: videoStream } = await s3.send(new GetObjectCommand(s3Params));
 
-    // Set headers for video streaming
-    res.writeHead(200, {
-      'Content-Type': 'video/mp4',
-      'Content-Disposition': 'inline',
-      'Accept-Ranges': 'bytes'
+    // Set up FFmpeg for real-time transcoding into s3
+    console.log(`Launching FFmpeg...`);
+    const ffmpegProcess = spawn(ffmpegPath, [
+      '-i', 'pipe:0',        // Read input from stdin (stream from S3)
+      '-c:v', 'libx264',     // Convert video codec to H.264 (for compatibility)
+      '-preset', 'fast',     // Faster encoding
+      '-b:v', '1000k',       // Limit bitrate to 1000kbps for faster streaming
+      '-c:a', 'aac',         // Convert audio codec to AAC
+      '-b:a', '128k',        // Set audio bitrate
+      '-r', '30',            // Force constant frame rate (CFR) to prevent VFR issues
+      '-movflags', 'frag_keyframe+empty_moov', // Makes MP4 streamable
+      '-f', 'mp4',           // Output format
+      'pipe:1'               // Write output to stdout (stream to S3)
+    ], {
+      stdio: ['pipe', 'pipe', 'inherit'] // Pipe input & output
     });
 
-    // Stream the video with ffmpeg, transcoding it if necessary
-    ffmpeg(s3Stream)
-      .videoCodec('libx264')  // Using H.264 codec
-      .audioCodec('aac')      // Using AAC codec
-      .format('mp4')
-      .outputOptions([
-        '-movflags frag_keyframe+empty_moov',  // Allows the video to be played before being fully downloaded
-        '-preset veryslow',   // Ensure transcoding quality is as high as possible
-        '-crf 18' // crf 18 ensures high quality transcoding
-      ])
-      .on('error', (err) => {
-        if (!res.headersSent) {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: false, message: 'Error in video transcoding' }));
-        } else {
-          res.end();  // If headers are already sent, end the response gracefully
-        }
-      })
-      .pipe(res, { end: true });
-  } catch (err) {
-    console.error('Error streaming video from S3:', err);
-    if (!res.headersSent) {
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: false, message: 'Error fetching video from S3' }));
-    } else {
-      res.end();  // End the response gracefully if headers were already sent
-    }
+
+    // Pipe the S3 stream into FFmpeg for transcoding
+    videoStream.pipe(ffmpegProcess.stdin);
+
+    // Upload the transcoded stream back to S3
+    const outputKey = `processed/${key.split("uploads/")[1]}`;
+    console.log(`Uploading transcoded video to S3: s3://${bucket}/${outputKey}`);
+
+    // upload transcoded video to the same S3 bucket it collected the video from, as per specifications
+    const upload= new Upload({
+      client: s3,
+      params: {
+        Bucket: bucket,
+        Key: outputKey,
+        Body: ffmpegProcess.stdout, // Stream FFmpeg output to S3
+        ContentType: 'video/mp4'
+      }
+    });
+
+    await upload.done();  
+
+    console.log(`Transcoding & Upload Complete: s3://${bucket}/${outputKey}`);
+  } catch (error) {
+    console.error(` Transcoding Failed:`, error);
   }
 }
-
-module.exports = {
-  transcodeVideo
-};
