@@ -1,6 +1,15 @@
 import mysql from "mysql2/promise";
 import { SecretsManagerClient, GetSecretValueCommand } from "@aws-sdk/client-secrets-manager";
 
+// Use envrionment variables
+import dotenv from 'dotenv';
+dotenv.config();
+
+const host = process.env.HOST;
+const user = process.env.USER;
+const password = process.env.PASSWORD;
+const database = process.env.DATABASE;
+
 const RDS_SECRET_NAME = "videoRDSCredentials";
 const client = new SecretsManagerClient({ region: "ap-southeast-2" });
 
@@ -30,10 +39,10 @@ async function connectToDatabase() {
   if (!pool) {
     console.log(`[${new Date().toISOString()}] Creating MySQL connection pool...`);
     pool = mysql.createPool({
-      host: "placeholderHost",
-      user: "placeholderUser",
-      password: "placeholderPassword",
-      database: "placeholderDatabase",
+      host: host,
+      user: user,
+      password: password,
+      database: database,
       waitForConnections: true,
       connectionLimit: 10,
       queueLimit: 0
